@@ -15,7 +15,7 @@ func NewExtensionNode(nibbleCount byte, nibbles []byte, child uint64, childNodeH
 	node.nibbles = make([]byte, len(nibbles))
 	copy(node.nibbles, nibbles)
 	node.children = []uint64 {child}
-	hash, err := node.ComputeExtensionNodeHash(childNodeHash)
+	hash, err := ComputeExtensionNodeHash(node.nibblesCountOddParity, node.Nibbles(), childNodeHash)
 	if err != nil {
 		return nil, err
 	}
@@ -42,17 +42,14 @@ func (node *Node) Nibbles() []byte {
 	return nibbles
 }
 
-func (node *Node) ComputeExtensionNodeHash(childNodeHash []byte) ([]byte, error) {
-	if node.nodeType != Extension {
-		return nil, errors.New("Incorrect node type for ComputeExtensionNodeHash()")
-	}
+func ComputeExtensionNodeHash(nibblesCountOddParity bool, nibbles []byte, childNodeHash []byte) ([]byte, error) {
 	var hash []byte
-	if node.nibblesCountOddParity {
+	if nibblesCountOddParity {
 		hash = append(hash, 1)
 	} else {
 		hash = append(hash, 0)
 	}
-	hash = append(hash, node.nibbles...)
+	hash = append(hash, nibbles...)
 	hash = append(hash, childNodeHash...)
 	hash = utils.Keccak256(hash)
 	if len(hash) != HashLen {

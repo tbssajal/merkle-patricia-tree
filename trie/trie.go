@@ -24,7 +24,7 @@ type iTrie interface {
 	// returns an error if not found.
 	Del(key []byte) error
 	// Commit saves the trie in persistent storage
-	// and returns the trie root key.
+	// and returns the trie root hash.
 	Commit() []byte
 	// Proof returns the Merkle-proof associated with
 	// a node. An error is returned if the node is not found.
@@ -42,11 +42,13 @@ type TrieHashMap struct {
 	rootId 			uint64
 	nodeCache		map[uint64]*nodes.Node
 	versionHandler	*VersionHandler
+	EmptyHash		[]byte
 }
 
 func (trie *TrieHashMap) init(versionHandler *VersionHandler) {
 	trie.nodeCache = make(map[uint64]*nodes.Node)
 	trie.versionHandler = versionHandler
+	trie.EmptyHash = make([]byte, nodes.HashLen)
 }
 
 func NewTrieHashMap(versionHandler *VersionHandler) *TrieHashMap {
@@ -84,15 +86,338 @@ func (trie *TrieHashMap) Put(key []byte, value []byte) {
 	}
 	rootId, err := trie.addNode(trie.rootId, 0, key, value, true)
 	if err == nil {
+		if rootId == trie.rootId {
+			return
+		}
 		root, newErr := trie.GetNodeById(rootId)
 		if newErr == nil {
 			trie.root = root
 			trie.rootId = rootId
 		} else {
-			fmt.Println("Failed to add (key, value) pair")
+			fmt.Println("Failed to fetch node with id", rootId)
+			panic("Failed to fetch node")
 		}
 	} else {
-		fmt.Println("Failed to add (key, value) pair")
+		fmt.Println("Failed to add (key, value) pair, error:", err)
+	}
+}
+
+func (trie *TrieHashMap) Del(key []byte) error {
+	key = utils.Keccak256(key)
+	if len(key) != nodes.HashLen {
+		panic("Incorrect hash length")
+	}
+	rootId, err := trie.deleteNode(trie.rootId, 0, key)
+	if err == nil {
+		if rootId == trie.rootId {
+			return nil
+		}
+
+		if rootId == 0 {
+			trie.rootId = 0
+			trie.root = nil
+			return nil
+		}
+
+		root, err := trie.GetNodeById(rootId)
+		if err == nil {
+			trie.root = root
+			trie.rootId = rootId
+			return nil
+		} else {
+			fmt.Println("Failed to fetch node with id", rootId)
+			panic("Failed to fetch node")
+		}
+	} else {
+		return err
+	}
+}
+
+func (trie *TrieHashMap) Commit() []byte {
+	if trie.rootId == 0 {
+		return trie.EmptyHash
+	} else {
+		trie.persistNodes(trie.rootId)
+		return trie.root.Hash()
+	}
+}
+
+// in proof we put:
+// proof[0] : value mapped with key at leaf node; leaf node hash : keccak256(keyHash.value)
+// proof[-1] : root hash
+// remaining elements of proof help to calculate the root hash
+func (trie *TrieHashMap) Proof(key []byte) ([][]byte, error) {
+	key = utils.Keccak256(key)
+	if len(key) != nodes.HashLen {
+		panic("Incorrect hash length")
+	}
+
+	var proof [][]byte
+	err := trie.findProof(trie.rootId, 0, key, proof)
+	if err != nil {
+		return nil, err
+	} else {
+		proof = append(proof, trie.root.Hash())
+		return proof, nil
+	}
+}
+
+func (trie *TrieHashMap) VerifyProof(key []byte, proof [][]byte) bool {
+	key = utils.Keccak256(key)
+	if len(key) != nodes.HashLen {
+		panic(errors.New("Incorrect hash length"))
+	}
+	proofLen := len(proof)
+	if proofLen < 2 {
+		return false
+	}
+
+	var nibbleHeight byte = 0
+	for i := 1 ; i < proofLen - 1; i++ {
+		proofSegmentLen := len(proof[i])
+		if proofSegmentLen == 1 {
+			// extension node
+			nibbleHeight += proof[i][0]
+		} else if proofSegmentLen > 1 {
+			// branch node
+			nibbleHeight++
+		} else {
+			// invalid
+			return false
+		}
+	}
+
+	// we have value mapped with key at proof[0]
+	// we calculate leaf node hash with it
+	// remaning elements help calculate hash of each parent node
+	// finally we get hash of root
+	hash, err := nodes.ComputeLeafNodeHash(key, proof[0])
+	if err != nil {
+		return false
+	}
+
+	for i := 1; i < proofLen - 1; i++ {
+		proofSegmentLen := len(proof[i])
+		if proofSegmentLen == 1 {
+			// extension node
+			nibbleHeight -= proof[i][0]
+			nibbles := utils.GetNibbles(key, int(nibbleHeight), int(proof[i][0]))
+			hash, err = nodes.ComputeExtensionNodeHash((proof[i][0] & 1) != 0, nibbles, hash)
+			if err != nil {
+				return false
+			}
+		} else if proofSegmentLen > 1 {
+			// branch node
+			nibbleHeight--
+			mask := uint16(proof[i][0])
+			nibble := utils.GetNibble(key, int(nibbleHeight))
+			
+		} else {
+			// invalid
+			return false
+		}
+	}
+}
+
+func (trie *TrieHashMap) persistNodes(rootId uint64) {
+	node, ok := trie.nodeCache[rootId]
+	if ok == false {
+		return
+	}
+	var childIds []uint64
+	if node.Type() == nodes.Branch {
+		childIds = node.Children()
+	} else if node.Type() == nodes.Extension {
+		childIds = append(childIds, node.Child())
+	}
+
+	childCount := len(childIds)
+	for i := 0; i < childCount; i++ {
+		trie.persistNodes(childIds[i])
+	}
+	repository.SaveNode(rootId, node)
+	delete(trie.nodeCache, rootId)
+}
+
+func (trie *TrieHashMap) deleteNode(rootId uint64, nibbleHeight byte, keyHash []byte) (uint64, error) {
+	if rootId == 0 {
+		return 0, errors.New("Key not found")
+	}
+
+	node, err := trie.GetNodeById(rootId)
+	if err != nil {
+		return 0, err
+	}
+
+	if node.Type() == nodes.Leaf {
+		if bytes.Equal(keyHash, node.KeyHash()) {
+			return 0, nil
+		} else {
+			return 0, errors.New("Key not found")
+		}
+	} else if node.Type() == nodes.Extension {
+		nibbleCount := node.NibbleCount()
+		if bytes.Equal(node.Nibbles(), utils.GetNibbles(keyHash, int(nibbleHeight), int(nibbleCount))) {
+			newNodeId, err := trie.deleteNode(node.Child(), nibbleHeight + nibbleCount, keyHash)
+			if err != nil {
+				return 0, err
+			} else {
+				// key is deleted
+				// current node is extension node
+				// that means its child must be a branch node with at least 2 children
+				// but we just deleted a key, so there is a possibility that the child is not a branch anymore
+				// it could be an extension or a leaf
+				// if the child is not a branch, current extension will be merged with its child
+				return trie.updateOrShrinkExtension(node, newNodeId), nil
+			}
+		} else {
+			return 0, errors.New("Key not found")
+		}
+	} else if node.Type() == nodes.Branch {
+		nibble := utils.GetNibble(keyHash, int(nibbleHeight))
+		newNodeId, err := trie.deleteNode(node.GetChildByNibble(nibble), nibbleHeight + 1, keyHash)
+		if err != nil {
+			return 0, err
+		} else {
+			return trie.updateOrShrinkBranch(node, newNodeId, nibble), nil
+		}
+	} else {
+		return 0, errors.New("Unsupported node type")
+	}
+}
+
+func (trie *TrieHashMap) updateOrShrinkBranch(branchNode *nodes.Node, newNodeId uint64, nibble byte) uint64 {
+	var childId uint64
+	var childNibble byte
+	childrenCount := branchNode.ChildrenCount()
+	if newNodeId == 0 {
+		if childrenCount == 1 {
+			panic("Impossible")
+		} else if childrenCount == 2 {
+			childNibbles := branchNode.GetChildNibbles()
+			for i := 0; i < int(childrenCount); i++ {
+				if childNibbles[i] != nibble {
+					childId = branchNode.GetChildByNibble(childNibbles[i])
+					childNibble = childNibbles[i]
+				}
+			}
+		} else {
+			// after deleting key, the node still have more than one children, so it is a valid branch
+			// just need to remove deleted child
+			return trie.reduceTrieBranchByOne(branchNode, nibble)
+		}
+	} else if childrenCount > 1 {
+		// no child is deleted, but one child is updated and the node has more than one child
+		// so it is a valid branch
+		return trie.updateTrieBranch(branchNode, newNodeId, nibble)
+	} else {
+		childId = newNodeId
+		childNibble = nibble
+	}
+
+	// currently the branch has only one child
+	// the only condition for the branch to be valid: the child has to be a branch node with more than one child
+	child, err := trie.GetNodeById(childId)
+	if err != nil {
+		panic(err)
+	}
+
+	if child.Type() == nodes.Branch {
+		if child.ChildrenCount() > 1 {
+			return trie.newBranchNode(1<<childNibble, []uint64 {childId}, [][]byte {child.Hash()})
+		} else {
+			// if the child is a branch with a single child, they will merge and become an extension
+			extensionNibble := (childNibble << 4) | child.GetChildNibbles()[0]
+			grandChildId := child.Children()[0]
+			// the grandChild must be a branch with more than one child
+			// so the merge is correct
+			grandChild, err := trie.GetNodeById(grandChildId)
+			if err != nil {
+				panic(err)
+			}
+			return trie.newExtensionNode(2, []byte {extensionNibble}, grandChildId, grandChild.Hash())
+		}
+	} else if child.Type() == nodes.Extension {
+		// the branch and the extension will merge and become one extension
+		extensionNibbles := utils.MergeNibbles([]byte {childNibble}, 1, child.Nibbles(), int(child.NibbleCount()))
+		grandChildId := child.Child()
+		grandChild, err := trie.GetNodeById(grandChildId)
+		if err != nil {
+			panic(err)
+		}
+		return trie.newExtensionNode(1 + child.NibbleCount(), extensionNibbles, grandChildId, grandChild.Hash())
+	} else if child.Type() == nodes.Leaf {
+		// branch and leaf will merge and become leaf
+		return childId
+	} else {
+		panic(errors.New("Unsupported node type"))
+	}
+}
+
+func (trie *TrieHashMap) updateOrShrinkExtension(extensionNode *nodes.Node, newNodeId uint64) uint64 {
+	newNode, err := trie.GetNodeById(newNodeId)
+	if err != nil {
+		panic(err)
+	}
+
+	if newNode.Type() == nodes.Branch {
+		// we still have a branch, but as it is a child of extension, it must have at least 2 children
+		if newNode.ChildrenCount() > 1 {
+			return trie.newExtensionNode(extensionNode.NibbleCount(), extensionNode.Nibbles(), newNodeId, newNode.Hash())
+		} else {
+			// the branch has only 1 child, so this branch needs to be replaced
+			childNodeId := newNode.Children()[0]
+			childNode, err := trie.GetNodeById(childNodeId)
+			if err != nil {
+				panic(err)
+			}
+
+			if childNode.Type() == nodes.Leaf {
+				// this branch and the current extension will be replaced by the leaf
+				return childNodeId
+			} else if childNode.Type() == nodes.Branch {
+				// the branch will be replaced by its child branch
+				// consecutive 2 branch node both cannot have 1 child only
+				// as the parent branch node has 1 child, the child branch node must have more than 1 child
+				// so the replacement is valid
+				nibblesCount := extensionNode.NibbleCount()
+				// we need to add one more nibble to the extension node
+				nibbles := utils.ExtendNibblesByOne(extensionNode.Nibbles(), int(nibblesCount), newNode.GetChildNibbles()[0])
+				return trie.newExtensionNode(nibblesCount + 1, nibbles, childNodeId, childNode.Hash())
+			} else if childNode.Type() == nodes.Extension {
+				// this extension node must have a child branch node and the child branch node must have
+				// at least 2 children
+				// so the current extension + its child branch node + this extension will become one single extension
+				nibblesCount := extensionNode.NibbleCount()
+				nibbles := utils.ExtendNibblesByOne(extensionNode.Nibbles(), int(nibblesCount), newNode.GetChildNibbles()[0])
+				nibbles = utils.MergeNibbles(nibbles, int(nibblesCount + 1), childNode.Nibbles(), int(childNode.NibbleCount()))
+				grandChildId := childNode.Child()
+				grandChild, err := trie.GetNodeById(grandChildId)
+				if err != nil {
+					panic(err)
+				}
+				return trie.newExtensionNode(nibblesCount + 1 + childNode.NibbleCount(), nibbles, grandChildId, grandChild.Hash())
+			} else {
+				panic(errors.New("Unsupported node type"))
+			}
+		}
+	} else if newNode.Type() == nodes.Leaf {
+		// extension cannot have leaf as child
+		return newNodeId
+	} else if newNode.Type() == nodes.Extension {
+		// extension node cannot have extension as child
+		// the two extensions will be merged into one
+		nibbles := utils.MergeNibbles(
+			extensionNode.Nibbles(), int(extensionNode.NibbleCount()), newNode.Nibbles(), int(newNode.NibbleCount()),
+		)
+		childId := newNode.Child()
+		child, err := trie.GetNodeById(childId)
+		if err != nil {
+			panic(err)
+		}
+		return trie.newExtensionNode(extensionNode.NibbleCount() + newNode.NibbleCount(), nibbles, childId, child.Hash())
+	} else {
+		panic(errors.New("Unsupported node type"))
 	}
 }
 
@@ -136,6 +461,62 @@ func (trie *TrieHashMap) find(key []byte) ([]byte, error) {
 	return nil, errors.New("Key not found")
 }
 
+func (trie *TrieHashMap) findProof(rootId uint64, nibbleHeight byte, keyHash []byte, proof [][]byte) error {
+	if rootId == 0 {
+		return errors.New("Key not found")
+	}
+
+	node, err := trie.GetNodeById(rootId)
+	if err != nil {
+		return err
+	}
+
+	if node.Type() == nodes.Leaf {
+		if bytes.Equal(keyHash, node.KeyHash()) {
+			proof = append(proof, node.Value())
+			return nil
+		} else {
+			return errors.New("Key not found")
+		}
+	} else if node.Type() == nodes.Extension {
+		nibbleCount := node.NibbleCount()
+		if bytes.Equal(
+			node.Nibbles(), utils.GetNibbles(keyHash, int(nibbleHeight), int(nibbleCount)),
+		) {
+			err := trie.findProof(node.Child(), nibbleHeight + nibbleCount, keyHash, proof)
+			if err != nil {
+				return err
+			}
+			proof = append(proof, []byte {nibbleCount})
+			return nil
+		} else {
+			return errors.New("Key not found")
+		}
+	} else if node.Type() == nodes.Branch {
+		nibble := utils.GetNibble(keyHash, int(nibbleHeight))
+		err := trie.findProof(node.GetChildByNibble(nibble), nibbleHeight + 1, keyHash, proof)
+		if err != nil {
+			return err
+		}
+		var branchProof []byte
+		branchProof = append(branchProof, byte(node.Mask()))
+		
+		childIds := node.Children()
+		childCount := len(childIds)
+		for i := 0 ; i < childCount ; i++ {
+			child, err := trie.GetNodeById(childIds[i])
+			if err != nil {
+				panic(err)
+			}
+			branchProof = append(branchProof, child.Hash()...)
+		}
+
+		return nil
+	} else {
+		panic("unsupported node type")
+	}
+}
+
 func (trie *TrieHashMap) addNode(
 	rootId uint64, nibbleHeight byte, keyHash []byte, value []byte, checkIfPresent bool,
 ) (uint64, error) {
@@ -168,6 +549,7 @@ func (trie *TrieHashMap) addNode(
 			}
 		}
 
+		// child of extension node must be a branch with at least 2 children
 		if matched == int(nibbleCount) {
 			newNodeId, err := trie.addNode(
 				node.Child(), nibbleHeight + byte(matched), keyHash, value, checkIfPresent,
@@ -179,6 +561,8 @@ func (trie *TrieHashMap) addNode(
 			if newNodeId == node.Child() {
 				return rootId, nil
 			} else {
+				// as node.Child() is a branch with at least 2 children; newNode must be a branch
+				// with at least 2 children because we are adding nodes
 				newNode, err := trie.GetNodeById(newNodeId)
 				if err != nil {
 					panic(err)
@@ -186,58 +570,199 @@ func (trie *TrieHashMap) addNode(
 				return trie.newExtensionNode(nibbleCount, nibbles, newNodeId, newNode.Hash()), nil
 			}
 		} else {
-			newLeafNodeId := trie.newLeafNode(keyHash, value)
-			newLeafNode, err := trie.GetNodeById(newLeafNodeId)
-			if err != nil {
-				panic(err)
-			}
-
-			remainingNibble := nibbleCount - byte(matched)
-			oldNodeChildId := node.Child()
-			oldNodeChild, err := trie.GetNodeById(oldNodeChildId)
-			if err != nil {
-				panic(err)
-			}
-
-			var newBranchNodeId uint64
-			if remainingNibble == 1 {
-				newBranchNodeId = trie.newBranchNodeFromLeaves(
-					oldNodeChildId, newLeafNodeId, utils.GetNibble(nibbles, int(nibbleCount - 1)),
-					utils.GetNibble(keyHash, int(nibbleHeight)), oldNodeChild.Hash(), newLeafNode.Hash(),
-				)
-			} else if remainingNibble == 2 {
-				tempBranchNodeId := trie.newBranchNode(
-					1<<utils.GetNibble(nibbles, int(nibbleCount - 1)), []uint64 {oldNodeChildId},
-					[][]byte {oldNodeChild.Hash()},
-				)
-				tempBranchNode, err := trie.GetNodeById(tempBranchNodeId)
-				if err != nil {
-					panic(err)
-				}
-				newBranchNodeId = trie.newBranchNodeFromLeaves(
-					tempBranchNodeId, newLeafNodeId, utils.GetNibble(nibbles, int(nibbleCount - 2)),
-					utils.GetNibble(keyHash, int(nibbleHeight)), tempBranchNode.Hash(), newLeafNode.Hash(),
-				)
-			}
+			return trie.updateTrieExtension(node, byte(matched), nibbleHeight, keyHash, value), nil
 		}
 
+	} else if node.Type() == nodes.Branch {
+		nibble := utils.GetNibble(keyHash, int(nibbleHeight))
+		childNodeId := node.GetChildByNibble(nibble)
+		newNodeId, err := trie.addNode(childNodeId, nibbleHeight + 1, keyHash, value, checkIfPresent)
+		if err != nil {
+			return 0, err
+		}
+
+		if newNodeId == childNodeId {
+			// no update in the trie
+			return rootId, nil
+		} else {
+			return trie.updateTrieBranch(node, newNodeId, nibble), nil
+		}
+	} else {
+		panic("Unsupported node type")
 	}
-	// switch (rootNode)
-	// {
-	// 	case InternalNode internalNode:
-	// 		var h = HashFragment(keyHash, height);
-	// 		var to = internalNode.GetChildByHash(h);
-	// 		var updatedTo = AddInternal(to, height + 1, keyHash, value, check);
-	// 		return ModifyInternalNode(root, internalNode, h, updatedTo,
-	// 			GetNodeById(updatedTo)?.Hash ?? throw new InvalidOperationException()
-	// 		);
-	// 	case LeafNode leafNode:
-	// 		if (!leafNode.KeyHash.SequenceEqual(keyHash))
-	// 			return SplitLeafNode(root, leafNode, height, keyHash, value);
-	// 		if (check)
-	// 			throw new ArgumentException("Specified keyHash is already present or hash collision occured");
-	// 		return UpdateLeafNode(root, leafNode, value);
-	// }
+}
+
+func (trie *TrieHashMap) reduceTrieBranchByOne(branchNode *nodes.Node, nibble byte) uint64 {
+	mask := branchNode.Mask()
+	childIds := branchNode.Children()
+	childCount := len(childIds)
+	var newChildHashes [][]byte
+	var newChildIds []uint64
+	var newNibbleMask uint16 = 1<<nibble
+	newMask := mask ^ newNibbleMask
+
+	currentMask := mask
+	for i := 0 ; i < childCount ; i++ {
+		// getting lowest nibble-mask
+		// removing lowest nibble-mask from next-mask
+		nextMask := currentMask & (currentMask - 1)
+		nibbleMask := currentMask ^ nextMask
+		currentMask = nextMask
+
+		if nibbleMask == newNibbleMask {
+			continue
+		}
+		
+		child, err := trie.GetNodeById(childIds[i])
+		if err != nil {
+			panic(err)
+		}
+		newChildIds = append(newChildIds, childIds[i])
+		newChildHashes = append(newChildHashes, child.Hash())
+	}
+
+	return trie.newBranchNode(newMask, newChildIds, newChildHashes)
+}
+
+func (trie *TrieHashMap) updateTrieBranch(
+	branchNode *nodes.Node, newNodeId uint64, newNodeNibble byte,
+) uint64 {
+	mask := branchNode.Mask()
+	childIds := branchNode.Children()
+	childCount := len(childIds)
+	var newChildHashes [][]byte
+	var newChildIds []uint64
+	var newNibbleMask uint16 = 1<<newNodeNibble
+	newMask := mask | newNibbleMask
+	var offset int
+
+	if newMask == mask {
+		// branch has child node with same nibble as newNodeNibble
+		newChildIds = make([]uint64, childCount)
+		newChildHashes = make([][]byte, childCount)
+		offset = 0
+	} else {
+		// branch does not have any child node with same nibble as newNodeNibble
+		newChildIds = make([]uint64, childCount + 1)
+		newChildHashes = make([][]byte, childCount + 1)
+		offset = 1
+	}
+
+	currentMask := newMask
+	for i := 0; i < childCount + offset; i++ {
+		// getting lowest nibble-mask
+		// removing lowest nibble-mask from next-mask
+		nextMask := currentMask & (currentMask - 1)
+		nibbleMask := currentMask ^ nextMask
+
+		var currentNodeId uint64
+		if nibbleMask < newNibbleMask {
+			currentNodeId = childIds[i]
+		} else if nibbleMask == newNibbleMask {
+			currentNodeId = newNodeId
+		} else {
+			currentNodeId = childIds[i - offset]
+		}
+
+		currentNode, err := trie.GetNodeById(currentNodeId)
+		if err != nil {
+			panic(err)
+		}
+		newChildIds[i] = currentNodeId
+		newChildHashes[i] = currentNode.Hash()
+
+		currentMask = nextMask
+	}
+
+	return trie.newBranchNode(newMask, newChildIds, newChildHashes)
+}
+
+func (trie *TrieHashMap) updateTrieExtension(
+	extensionNode *nodes.Node, matched byte, nibbleHeight byte, keyHash []byte, value []byte,
+) uint64 {
+	// we got a new leaf node
+	newLeafNodeId := trie.newLeafNode(keyHash, value)
+	newLeafNode, err := trie.GetNodeById(newLeafNodeId)
+	if err != nil {
+		panic(err)
+	}
+
+	nibbleCount := extensionNode.NibbleCount()
+	nibbles := extensionNode.Nibbles()
+	remainingNibble := nibbleCount - matched
+	// this child node is a branch node with at least 2 children
+	oldNodeChildId := extensionNode.Child()
+	oldNodeChild, err := trie.GetNodeById(oldNodeChildId)
+	if err != nil {
+		panic(err)
+	}
+
+	var newBranchNodeId uint64 = 0
+	if remainingNibble == 1 {
+		// new branch node with 2 children: child of current extension node and new leaf node
+		newBranchNodeId = trie.newBranchNodeFromLeaves(
+			oldNodeChildId, newLeafNodeId, utils.GetNibble(nibbles, int(nibbleCount - 1)),
+			utils.GetNibble(keyHash, int(nibbleHeight + matched)), oldNodeChild.Hash(), newLeafNode.Hash(),
+		)
+	} else if remainingNibble == 2 {
+		// intermediate branch node is created with only one child: child of current extension node
+		// remember, child of current extension node is also a branch node with at least 2 children
+		// so the intermediate branch node is correct
+		tempBranchNodeId := trie.newBranchNode(
+			1<<utils.GetNibble(nibbles, int(nibbleCount - 1)), []uint64 {oldNodeChildId},
+			[][]byte {oldNodeChild.Hash()},
+		)
+		tempBranchNode, err := trie.GetNodeById(tempBranchNodeId)
+		if err != nil {
+			panic(err)
+		}
+		// new branch node with 2 children: created intermediate branch node above and new leaf node
+		newBranchNodeId = trie.newBranchNodeFromLeaves(
+			tempBranchNodeId, newLeafNodeId, utils.GetNibble(nibbles, int(nibbleCount - 2)),
+			utils.GetNibble(keyHash, int(nibbleHeight + matched)), tempBranchNode.Hash(), newLeafNode.Hash(),
+		)
+	} else {
+		// a new extension node is created with one child: child of current extension node
+		// so it is a correct extension node
+		newNibbles := utils.GetNibbles(nibbles, int(nibbleCount - remainingNibble + 1), int(remainingNibble - 1))
+		newExtensionNodeId := trie.newExtensionNode(remainingNibble - 1, newNibbles, oldNodeChildId, oldNodeChild.Hash())
+		newExtensionNode, err := trie.GetNodeById(newExtensionNodeId)
+		if err != nil {
+			panic(err)
+		}
+		// new branch node with 2 children: created extension node above and new leaf node
+		newBranchNodeId = trie.newBranchNodeFromLeaves(
+			newExtensionNodeId, newLeafNodeId, utils.GetNibble(nibbles, int(nibbleCount-remainingNibble)),
+			utils.GetNibble(keyHash, int(nibbleHeight + matched)), newExtensionNode.Hash(), newLeafNode.Hash(),
+		)
+	}
+
+	if newBranchNodeId == 0 {
+		panic("something is wrong")
+	}
+
+	if matched == 0 {
+		// extension node is replaced by the new branch node
+		return newBranchNodeId
+	}
+
+	newBranchNode, err := trie.GetNodeById(newBranchNodeId)
+	if err != nil {
+		panic(err)
+	}
+	if matched == 1 {
+		// extension node is replaced by another branch node with 1 child: the new branch node created above
+		// the new branch node created above has 2 children, so the replacement is correct
+		return trie.newBranchNode(
+			1<<utils.GetNibble(nibbles, 0), []uint64 {newBranchNodeId}, [][]byte {newBranchNode.Hash()},
+		)
+	} else {
+		// more than 1 nibbles matched, so the extension node will remain, but nibbles will be updated
+		// its child will be the new branch node created above
+		return trie.newExtensionNode(
+			matched, utils.GetNibbles(nibbles, 0, int(matched)), newBranchNodeId, newBranchNode.Hash(),
+		)
+	}
 }
 
 func (trie *TrieHashMap) splitLeafNode(

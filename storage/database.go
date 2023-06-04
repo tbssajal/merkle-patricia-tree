@@ -1,6 +1,10 @@
 package storage
 
+// TODO: implement
 func GetRaw(key []byte) []byte {
-	var raw []byte
-	return raw
+	
+}
+
+func Save(key []byte, value []byte) {
+	
 }

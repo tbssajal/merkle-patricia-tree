@@ -15,7 +15,7 @@ func NewLeafNode(keyHash []byte, value []byte) (*Node, error) {
 	copy(node.keyHash, keyHash)
 	node.value = make([]byte, len(value))
 	copy(node.value, value)
-	hash, err := node.ComputeLeafNodeHash()
+	hash, err := ComputeLeafNodeHash(node.KeyHash(), node.Value())
 	if err != nil {
 		return nil, err
 	}
@@ -36,13 +36,10 @@ func (node *Node) Value() []byte {
 	return value
 }
 
-func (node *Node) ComputeLeafNodeHash() ([]byte, error) {
-	if node.nodeType != Leaf {
-		return nil, errors.New("Incorrect node type for ComputeLeafNodeHash()")
-	}
+func ComputeLeafNodeHash(keyHash []byte, value []byte) ([]byte, error) {
 	var hash []byte
-	hash = append(hash, node.keyHash...)
-	hash = append(hash, node.value...)
+	hash = append(hash, keyHash...)
+	hash = append(hash, value...)
 	hash = utils.Keccak256(hash)
 	if len(hash) != HashLen {
 		return nil, errors.New("node hash has incorrect length")

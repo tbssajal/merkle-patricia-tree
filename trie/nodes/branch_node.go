@@ -22,7 +22,7 @@ func NewBranchNode(mask uint16, children []uint64, childNodeHashes [][]byte) (*N
 	node.mask = mask
 	node.children = make([]uint64, len(children))
 	copy(node.children, children)
-	hash, err := node.ComputeBranchNodeHash(childNodeHashes)
+	hash, err := ComputeBranchNodeHash(node.mask, childNodeHashes)
 	if err != nil {
 		return nil, err
 	}
@@ -43,12 +43,19 @@ func (node *Node) GetChildByNibble(nibble byte) uint64 {
 	}
 }
 
-func (node *Node) ComputeBranchNodeHash(childNodeHashes [][]byte) ([]byte, error) {
-	if node.nodeType != Branch {
-		return nil, errors.New("Incorrect node type for ComputeBranchNodeHash()")
-	}
+func (node *Node) ChildrenCount() byte {
+	return byte(len(node.children))
+}
 
-	labels := node.GetChildLabels()
+func (node *Node) Children() []uint64 {
+	children := make([]uint64, len(node.children))
+	copy(children, node.children)
+	return children
+}
+
+func ComputeBranchNodeHash(mask uint16, childNodeHashes [][]byte) ([]byte, error) {
+
+	labels := GetNibblesFromMask(mask)
 	if len(labels) != len(childNodeHashes) {
 		return nil, errors.New("Missing labels or children hash")
 	}
@@ -70,9 +77,8 @@ func (node *Node) ComputeBranchNodeHash(childNodeHashes [][]byte) ([]byte, error
 	return hash, nil
 }
 
-func (node *Node) GetChildLabels() []byte {
+func GetNibblesFromMask(mask uint16) []byte {
 	var labels []byte
-	mask := node.mask
 	for i := 0; i < MaxNibbleCount; i++ {
 		if (mask & 1) != 0 {
 			labels = append(labels, byte(i))
@@ -80,6 +86,10 @@ func (node *Node) GetChildLabels() []byte {
 		mask = mask >> 1
 	}
 	return labels
+}
+
+func (node *Node) GetChildNibbles() []byte {
+	return GetNibblesFromMask(node.mask)
 }
 
 // TODO: implement serializer
