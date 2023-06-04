@@ -18,6 +18,10 @@ func GetNibbles(data []byte, startPos int, nibbleCount int) []byte{
 		startPos++
 	}
 
+	return NibblesToBytes(nibbles, nibbleCount)
+}
+
+func NibblesToBytes(nibbles []byte, nibbleCount int) []byte {
 	nibblesInBytes := make([]byte, (nibbleCount + 1) >> 1)
 	for i := 0; i < nibbleCount; i++ {
 		if (i & 1) != 0 {
