@@ -162,15 +162,16 @@ func (trie *TrieHashMap) addNode(
 		matched := 0
 		for matched = 0; matched < int(nibbleCount); matched++ {
 			extensionNibble := utils.GetNibble(nibbles, matched)
-			currentNibble := utils.GetNibble(keyHash, int(nibbleHeight))
-			nibbleHeight++
+			currentNibble := utils.GetNibble(keyHash, int(nibbleHeight) + matched)
 			if extensionNibble != currentNibble {
 				break
 			}
 		}
 
 		if matched == int(nibbleCount) {
-			newNodeId, err := trie.addNode(node.Child(), nibbleHeight, keyHash, value, checkIfPresent)
+			newNodeId, err := trie.addNode(
+				node.Child(), nibbleHeight + byte(matched), keyHash, value, checkIfPresent,
+			)
 			if err != nil {
 				return 0, err
 			}
@@ -198,16 +199,25 @@ func (trie *TrieHashMap) addNode(
 				panic(err)
 			}
 
-			var newBranchNode *nodes.Node
+			var newBranchNodeId uint64
 			if remainingNibble == 1 {
-				newBranchNodeId := trie.newBranchNodeFromLeaves(
-					oldNodeChildId, newLeafNodeId, nibbles[nibbleCount - 1], utils.GetNibble(keyHash, int(nibbleHeight)),
-					oldNodeChild.Hash(), newLeafNode.Hash(),
+				newBranchNodeId = trie.newBranchNodeFromLeaves(
+					oldNodeChildId, newLeafNodeId, utils.GetNibble(nibbles, int(nibbleCount - 1)),
+					utils.GetNibble(keyHash, int(nibbleHeight)), oldNodeChild.Hash(), newLeafNode.Hash(),
 				)
-				newBranchNode, err = trie.GetNodeById(newBranchNodeId)
+			} else if remainingNibble == 2 {
+				tempBranchNodeId := trie.newBranchNode(
+					1<<utils.GetNibble(nibbles, int(nibbleCount - 1)), []uint64 {oldNodeChildId},
+					[][]byte {oldNodeChild.Hash()},
+				)
+				tempBranchNode, err := trie.GetNodeById(tempBranchNodeId)
 				if err != nil {
 					panic(err)
 				}
+				newBranchNodeId = trie.newBranchNodeFromLeaves(
+					tempBranchNodeId, newLeafNodeId, utils.GetNibble(nibbles, int(nibbleCount - 2)),
+					utils.GetNibble(keyHash, int(nibbleHeight)), tempBranchNode.Hash(), newLeafNode.Hash(),
+				)
 			}
 		}
 
