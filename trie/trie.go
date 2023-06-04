@@ -51,6 +51,21 @@ func (trie *TrieHashMap) Get(key []byte) ([]byte, error) {
 	return trie.find(key)
 }
 
+func (trie *TrieHashMap) Put(key []byte, value []byte) {
+	key = utils.Keccak256(key)
+	if len(key) != nodes.HashLen {
+		panic("Incorrect hash length")
+	}
+	rootId, err := trie.addNode(trie.rootId, 0, key, value, true)
+	if err == nil {
+		root, newErr := trie.GetNodeById(rootId)
+		if newErr == nil {
+			trie.root = root
+			trie.rootId = rootId
+		}
+	}
+}
+
 func (trie *TrieHashMap) find(key []byte) ([]byte, error) {
 	currentNodeId := trie.rootId
 	nibbleHeight := 0
@@ -89,6 +104,12 @@ func (trie *TrieHashMap) find(key []byte) ([]byte, error) {
 	}
 
 	return nil, errors.New("Key not found")
+}
+
+func (trie *TrieHashMap) addNode(
+	rootId uint64, nibbleHeight byte, keyHash []byte, value []byte, checkIfPresent bool,
+) (uint64, error) {
+	
 }
 
 func (trie *TrieHashMap) GetNodeById(nodeId uint64) (*nodes.Node, error) {
