@@ -8,6 +8,7 @@ func PositionOf(mask uint16, h byte) byte {
 		if (mask ^ nextMask) >= bit {
 			return res
 		}
+		mask = nextMask
 		res++
 	}
 	return res

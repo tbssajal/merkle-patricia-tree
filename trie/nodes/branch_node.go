@@ -9,12 +9,23 @@ const (
 	MaxNibbleCount = 16
 )
 
+func newBranchNodeGivenHash(mask uint16, children []uint64, hash []byte) *Node {
+	node := new(Node)
+	node.nodeType = Branch
+	node.mask = mask
+	node.children = make([]uint64, len(children))
+	copy(node.children, children)
+	node.hash = make([]byte, HashLen)
+	copy(node.hash, hash)
+	return node
+}
+
 func NewBranchNode(mask uint16, children []uint64, childNodeHashes [][]byte) (*Node, error) {
 	if mask == 0 {
 		return nil, errors.New("No children of branch type node")
 	}
-	if len(childNodeHashes) != len(children) {
-		return nil, errors.New("Missing child-ids or children hash")
+	if len(childNodeHashes) != len(children) || len(GetNibblesFromMask(mask)) != len(children) {
+		return nil, errors.New("Missing children")
 	}
 
 	node := new(Node)
@@ -92,11 +103,72 @@ func (node *Node) GetChildNibbles() []byte {
 	return GetNibblesFromMask(node.mask)
 }
 
-// TODO: implement serializer
 func (node *Node) BranchNodeToBytes() []byte {
+	childCount := len(node.children)
+	childIdLen := 8
+	
+	nodeTypeLen := 1
+	hashLen := HashLen
+	maskLen := 2
+	childLen := childCount * childIdLen
 
+	bytes := make([]byte, nodeTypeLen + hashLen + maskLen + childLen)
+	pos := 0
+	bytes[pos] = byte(node.nodeType)
+	pos += nodeTypeLen
+
+	copy(bytes[pos:pos+hashLen], node.hash)
+	pos += hashLen
+
+	copy(bytes[pos:pos+maskLen], utils.UInt16ToBytes(node.mask))
+	pos += maskLen
+
+	for i := 0 ; i < childCount ; i++ {
+		copy(bytes[pos:pos+childIdLen], utils.UInt64ToBytes(node.children[i]))
+		pos += childIdLen
+	}
+
+	return bytes
 }
 
 func BranchNodeFromBytes(bytes []byte) (*Node, error) {
+	childCount := 2
+	childIdLen := 8
 	
+	nodeTypeLen := 1
+	hashLen := HashLen
+	maskLen := 2
+	childLen := childCount * childIdLen
+
+	if len(bytes) < nodeTypeLen + hashLen + maskLen + childLen {
+		return nil, errors.New("Not enough bytes to decode branch node")
+	}
+
+	pos := 0
+	if bytes[pos] != byte(Branch) {
+		return nil, errors.New("Cannot decode branch node, incorrect node type")
+	}
+	pos += nodeTypeLen
+
+	hash := make([]byte, hashLen)
+	copy(hash, bytes[pos:pos+hashLen])
+	pos += hashLen
+
+	mask := utils.UInt16FromBytes(bytes[pos:pos+maskLen])
+	pos += maskLen
+
+	childCount = len(GetNibblesFromMask(mask))
+	childLen = childCount * childIdLen
+
+	if len(bytes) < nodeTypeLen + hashLen + maskLen + childLen {
+		return nil, errors.New("Not enough bytes to decode branch node")
+	}
+
+	children := make([]uint64, childCount)
+	for i := 0 ; i < childCount ; i++ {
+		children[i] = utils.UInt64FromBytes(bytes[pos:pos+childIdLen])
+		pos += childIdLen
+	}
+
+	return newBranchNodeGivenHash(mask, children, hash), nil
 }

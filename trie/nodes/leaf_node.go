@@ -47,11 +47,42 @@ func ComputeLeafNodeHash(keyHash []byte, value []byte) ([]byte, error) {
 	return hash, nil
 }
 
-// TODO: implement serializer
 func (node *Node) LeafNodeToBytes() []byte {
-	
+	nodeTypeLen := 1
+	keyHashLen := HashLen
+	valueLen := len(node.value)
+	bytes := make([]byte, nodeTypeLen + keyHashLen + valueLen)
+
+	pos := 0
+	bytes[pos] = byte(node.nodeType)
+	pos += nodeTypeLen
+
+	copy(bytes[pos:pos + keyHashLen], node.keyHash)
+	pos += keyHashLen
+
+	copy(bytes[pos:pos+valueLen], node.value)
+	return bytes
 }
 
 func LeafNodeFromBytes(bytes []byte) (*Node, error) {
-	
+	nodeTypeLen := 1
+	keyHashLen := HashLen
+	if (len(bytes) < nodeTypeLen + keyHashLen) {
+		return nil, errors.New("Not enough bytes to decode leaf node")
+	}
+
+	pos := 0
+	nodeType := bytes[pos]
+	if nodeType != byte(Leaf) {
+		return nil, errors.New("Cannot decode leaf node, incorrect node type")
+	}
+	pos += nodeTypeLen
+
+	keyHash := make([]byte, keyHashLen)
+	copy(keyHash, bytes[pos:pos+keyHashLen])
+	pos += keyHashLen
+
+	var value []byte
+	value = append(value, bytes[pos:]...)
+	return NewLeafNode(keyHash, value)
 }

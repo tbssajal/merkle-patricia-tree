@@ -1,28 +1,47 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
-	"merkle-patricia-tree/trie/nodes"
-	"merkle-patricia-tree/utils"
+	"merkle-patricia-tree/storage"
+	"merkle-patricia-tree/storage/version_handler"
+	"merkle-patricia-tree/trie"
+	"merkle-patricia-tree/trie/repository"
 )
 
 func main() {
-	fmt.Println("main")
-	utils.Test()
-	var keyHash []byte
-	for i := 0; i < 32; i++ {
-		keyHash = append(keyHash, byte(i))
-	}
-	fmt.Println(len(keyHash))
+	db := storage.NewDeafaultDB()
+	versionHandler := version_handler.NewVersionHandler(db)
+	nodeRepo := repository.NewNodeRepository(db)
+	trie := trie.NewTrieHashMap(versionHandler, nodeRepo)
+
+	var key []byte
 	var value []byte
-	node, _ := nodes.NewLeafNode(keyHash, value)
-	hash := node.Hash()
-	L := len(hash)
-	fmt.Println(L)
-	fmt.Println(hash)
-	hash[0] = 5
-	fmt.Println(hash)
-	newHash := node.Hash()
-	fmt.Println(newHash)
-	// node.Ke
+	
+	trie.Put(key, value)
+	newValue, err := trie.Get(key)
+	if err != nil {
+		fmt.Println(err)
+		panic(err)
+	}
+	if !bytes.Equal(value, newValue) {
+		msg := "Value not matched"
+		fmt.Println(msg)
+		panic(msg)
+	}
+
+	proof, err := trie.Proof(key)
+	if err != nil {
+		fmt.Println(err)
+		panic(err)
+	}
+
+	if !trie.VerifyProof(key, proof) {
+		msg := "proof not verified"
+		fmt.Println(msg)
+		panic(msg)
+	}
+
+	fmt.Println("Done!")
+
 }

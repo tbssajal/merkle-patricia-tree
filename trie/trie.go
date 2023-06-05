@@ -29,6 +29,8 @@ type iTrie interface {
 	// Proof returns the Merkle-proof associated with
 	// a node. An error is returned if the node is not found.
 	Proof(key []byte) ([][]byte, error)
+	// Verifies the proof related with the key
+	VerifyProof(key []byte, proof [][]byte) bool
 }
 
 const (
@@ -36,32 +38,35 @@ const (
 )
 
 type VersionHandler = version_handler.VersionHandler
+type Repository = repository.NodeRepository
 
 type TrieHashMap struct {
 	root 			*nodes.Node
 	rootId 			uint64
 	nodeCache		map[uint64]*nodes.Node
 	versionHandler	*VersionHandler
+	nodeRepo 		*repository.NodeRepository
 	EmptyHash		[]byte
 }
 
-func (trie *TrieHashMap) init(versionHandler *VersionHandler) {
+func (trie *TrieHashMap) init(versionHandler *VersionHandler, nodeRepo *Repository) {
 	trie.nodeCache = make(map[uint64]*nodes.Node)
 	trie.versionHandler = versionHandler
+	trie.nodeRepo = nodeRepo
 	trie.EmptyHash = make([]byte, nodes.HashLen)
 }
 
-func NewTrieHashMap(versionHandler *VersionHandler) *TrieHashMap {
+func NewTrieHashMap(versionHandler *VersionHandler, nodeRepo *Repository) *TrieHashMap {
 	trie := new(TrieHashMap)
-	trie.init(versionHandler)
+	trie.init(versionHandler, nodeRepo)
 	trie.root = nil
 	trie.rootId = 0
 	return trie
 }
 
-func NewTrieHashMapFromRoot(rootId uint64, versionHandler *VersionHandler) *TrieHashMap {
+func NewTrieHashMapFromRoot(rootId uint64, versionHandler *VersionHandler, nodeRepo *Repository) *TrieHashMap {
 	trie := new(TrieHashMap)
-	trie.init(versionHandler)
+	trie.init(versionHandler, nodeRepo)
 	root, err := trie.GetNodeById(rootId)
 	if err != nil {
 		return nil
@@ -162,6 +167,7 @@ func (trie *TrieHashMap) Proof(key []byte) ([][]byte, error) {
 	}
 }
 
+// Verifies the proof related with the key
 func (trie *TrieHashMap) VerifyProof(key []byte, proof [][]byte) bool {
 	key = utils.Keccak256(key)
 	if len(key) != nodes.HashLen {
@@ -202,6 +208,7 @@ func (trie *TrieHashMap) VerifyProof(key []byte, proof [][]byte) bool {
 			// extension node
 			nibbleHeight -= proof[i][0]
 			nibbles := utils.GetNibbles(key, int(nibbleHeight), int(proof[i][0]))
+			// calucalate parent hash
 			hash, err = nodes.ComputeExtensionNodeHash((proof[i][0] & 1) != 0, nibbles, hash)
 			if err != nil {
 				return false
@@ -211,12 +218,37 @@ func (trie *TrieHashMap) VerifyProof(key []byte, proof [][]byte) bool {
 			nibbleHeight--
 			mask := uint16(proof[i][0])
 			nibble := utils.GetNibble(key, int(nibbleHeight))
-			
+			if (mask & (1<<nibble)) == 0 {
+				return false
+			}
+			pos := utils.PositionOf(mask, nibble)
+			var childHashes [][]byte
+
+			proofSegmentLen := len(proof[i])
+			for i := 1 ; i < proofSegmentLen ; i += nodes.HashLen {
+				if i + nodes.HashLen > proofSegmentLen {
+					return false
+				}
+				childHashes = append(childHashes, proof[i][i:i+nodes.HashLen])
+			}
+			// calculate parent hash
+			parHash, err := nodes.ComputeBranchNodeHash(mask, childHashes)
+			if err != nil {
+				return false
+			}
+			// check if childHashes contain my hash
+			if !bytes.Equal(hash, childHashes[pos]) {
+				return false
+			}
+			hash = parHash
 		} else {
 			// invalid
 			return false
 		}
 	}
+
+	// check if root hash equals to calculated hash
+	return bytes.Equal(hash, proof[proofLen - 1])
 }
 
 func (trie *TrieHashMap) persistNodes(rootId uint64) {
@@ -235,7 +267,7 @@ func (trie *TrieHashMap) persistNodes(rootId uint64) {
 	for i := 0; i < childCount; i++ {
 		trie.persistNodes(childIds[i])
 	}
-	repository.SaveNode(rootId, node)
+	trie.nodeRepo.SaveNode(rootId, node)
 	delete(trie.nodeCache, rootId)
 }
 
@@ -878,7 +910,7 @@ func (trie *TrieHashMap) saveNode(newNode *nodes.Node) uint64 {
 func (trie *TrieHashMap) GetNodeById(nodeId uint64) (*nodes.Node, error) {
 	node, ok := trie.nodeCache[nodeId]
 	if ok == false {
-		return repository.GetNodeById(nodeId)
+		return trie.nodeRepo.GetNodeById(nodeId)
 	} else {
 		return node, nil
 	}
