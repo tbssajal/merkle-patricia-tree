@@ -27,6 +27,18 @@ func (nodeRepo *NodeRepository) GetNodeById(nodeId uint64) (*nodes.Node, error) 
 	}
 }
 
+func (nodeRepo *NodeRepository) GetNodeByHash(hash []byte) (*nodes.Node, error) {
+	prefix := storage.PrefixNodeIdByHash(hash)
+	value := nodeRepo.rocksDb.Get(prefix)
+	if value == nil {
+		return nil, errors.New("Node not found in database")
+	} else {
+		prefix = storage.PrefixNodeById(utils.UInt64FromBytes(value))
+		value = nodeRepo.rocksDb.Get(prefix)
+		return nodes.FromBytes(value)
+	}
+}
+
 func (nodeRepo *NodeRepository) SaveNode(nodeId uint64, node *nodes.Node) {
 	batch := storage.NewAtomicWrite(nodeRepo.rocksDb)
 	// save node by id
